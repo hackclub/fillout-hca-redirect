@@ -1,9 +1,9 @@
 let { token } = input.config();
 
-let response = await fetch("{SCHEMA}://{BASE_URL}/fields", {
+let response = await fetch("{BASE_URL}/fields", {
   headers: {
     Authorization: "Bearer " + token,
-    "ngrok-skip-browser-warning": "1",
+    {NGROK_HEADER}
   },
 });
 

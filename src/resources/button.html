@@ -9,10 +9,10 @@
 
     function initialAuthRedirect() {
       window.top.location.href =
-        "https://auth.hackclub.com/oauth/authorize?client_id={CLIENT_ID}&redirect_uri={SCHEMA}://{BASE_URL}/callback&response_type=code&scope=phone+birthdate+address+verification_status+slack_id+basic_info&state=" +
-        state +
-        "fillout_url" +
-        window.location.href;
+        "https://auth.hackclub.com/oauth/authorize?client_id={CLIENT_ID}&redirect_uri={BASE_URL}/callback&response_type=code&scope=phone+birthdate+address+verification_status+slack_id+basic_info&state=" +
+        encodeURIComponent(
+          state + "hack_club-redirect_fillout_url" + window.location.href,
+        );
     }
 
     function getButton() {
@@ -41,57 +41,50 @@
       document.getElementById("btn").innerText = "Logged in with Hack Club";
     }
 
-    function getCookie(name) {
-      return document.cookie
-        .split("; ")
-        .find((row) => row.startsWith(name + "="))
-        ?.slice((name + "=").length);
-    }
-
-    function startNewState() {
-      document.cookie = "state=" + state + "; max-age=600; path=/;";
-      disableButton();
-    }
-
     function populateToken(token) {
-      let input = [...window.top.document.querySelectorAll("input")].find(
-        (i) =>
-          [i.name, i.id, i.placeholder, i.getAttribute("aria-label")].some(
-            (attr) => attr && attr.toLowerCase().includes("token"),
-          ),
+      let input = [...window.top.document.querySelectorAll("input")].find((i) =>
+        [i.name, i.id, i.placeholder, i.getAttribute("aria-label")].some(
+          (attr) => attr && attr.toLowerCase() === "token",
+        ),
       );
+      if (!input) {
+        getButton().innerText =
+          'Missing internal "token" field (contact the YSWS organizer)';
+        return false;
+      }
       Object.getOwnPropertyDescriptor(
         window.top.HTMLInputElement.prototype,
         "value",
       ).set.call(input, token);
       input.dispatchEvent(new window.top.Event("input", { bubbles: true }));
+      return true;
     }
 
-    let token_val = getCookie("token");
-    let state_val = getCookie("state");
+    let redeem_id = new URLSearchParams(
+      window.top.location.hash.slice(1),
+    ).get("hca_redeem");
 
-    if (token_val) {
-      populateToken(token_val);
-      enableButton();
-    } else if (state_val) {
-      fetch("{SCHEMA}://{BASE_URL}/redeem?state=" + state_val, {
-        headers: { "ngrok-skip-browser-warning": "1" },
-      })
-        .then((response) => {
-          if (response.status === 400) {
-            startNewState();
-            return null;
-          }
-          return response.text();
-        })
-        .then((token) => {
-          if (token === null) return;
-          document.cookie = "token=" + token + "; max-age=600; path=/;";
-          populateToken(token);
-          enableButton();
-        });
+    if (redeem_id === null) {
+      disableButton();
     } else {
-      startNewState();
+      window.top.history.replaceState(
+        null,
+        "",
+        window.top.location.pathname + window.top.location.search,
+      );
+      fetch("{BASE_URL}/redeem?redeem=" + encodeURIComponent(redeem_id), {
+        headers: { {NGROK_HEADER} },
+      })
+        .then((response) => (response.ok ? response.text() : null))
+        .then((token) => {
+          if (token === null) {
+            disableButton();
+            return;
+          }
+          if (populateToken(token)) {
+            enableButton();
+          }
+        });
     }
   </script>
   <p

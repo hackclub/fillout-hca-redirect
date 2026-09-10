@@ -1,4 +1,7 @@
 use actix_cors::Cors;
+use actix_governor::{Governor, GovernorConfigBuilder, KeyExtractor, SimpleKeyExtractionError};
+use actix_web::dev::ServiceRequest;
+use std::net::IpAddr;
 use actix_web::http::header;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
 use rand::RngExt;
@@ -8,6 +11,109 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 const REGISTRY_TTL: Duration = Duration::from_secs(600);
+const STATE_SEPARATOR: &str = "hack_club-redirect_fillout_url";
+const REDEEM_FRAGMENT: &str = "hca_redeem";
+
+#[cfg(debug_assertions)]
+const NGROK_HEADER: &str = "\"ngrok-skip-browser-warning\": \"1\",";
+#[cfg(not(debug_assertions))]
+const NGROK_HEADER: &str = "";
+
+struct Config {
+    base_url: String,
+    client_id: String,
+    client_secret: String,
+}
+
+static CONFIG: OnceLock<Config> = OnceLock::new();
+
+fn config() -> &'static Config {
+    CONFIG.get().expect("config is set before the server starts")
+}
+
+fn require_env(name: &str) -> String {
+    env::var(name).unwrap_or_else(|_| panic!("{name} must be set"))
+}
+
+#[cfg(not(debug_assertions))]
+const BASE_URL: &str = "https://fillout-hca-redirect.hackclub.com";
+
+#[cfg(debug_assertions)]
+fn base_url() -> String {
+    require_env("BASE_URL")
+}
+
+#[cfg(not(debug_assertions))]
+fn base_url() -> String {
+    BASE_URL.to_string()
+}
+
+fn random_token() -> String {
+    (&mut rand::rng())
+        .sample_iter(Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect()
+}
+
+const ALLOWED_FORM_HOSTS: [&str; 2] = ["fillout.com", "forms.hackclub.com"];
+
+fn is_allowed_form_url(url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if url.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    ALLOWED_FORM_HOSTS
+        .iter()
+        .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")))
+}
+
+#[cfg(not(debug_assertions))]
+fn is_allowed_origin(origin: &header::HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    origin == config().base_url || is_allowed_form_url(origin)
+}
+
+fn is_trusted_proxy(peer: &IpAddr) -> bool {
+    match peer {
+        IpAddr::V4(peer) => peer.is_loopback() || peer.is_private() || peer.is_link_local(),
+        IpAddr::V6(peer) => {
+            let segments = peer.segments();
+            peer.is_loopback()
+                || segments[0] & 0xfe00 == 0xfc00
+                || segments[0] & 0xffc0 == 0xfe80
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ClientIpKeyExtractor;
+
+impl KeyExtractor for ClientIpKeyExtractor {
+    type Key = String;
+    type KeyExtractionError = SimpleKeyExtractionError<&'static str>;
+
+    fn extract(&self, req: &ServiceRequest) -> Result<Self::Key, Self::KeyExtractionError> {
+        let peer = req.peer_addr().map(|socket| socket.ip());
+        let forwarded = peer
+            .filter(is_trusted_proxy)
+            .and(req.headers().get("x-forwarded-for"))
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .map(|client| client.trim().to_string());
+
+        forwarded
+            .or_else(|| peer.map(|peer| peer.to_string()))
+            .ok_or_else(|| SimpleKeyExtractionError::new("could not determine client address"))
+    }
+}
 
 static REDEEM_REGISTRY: OnceLock<Mutex<Vec<(String, String, Instant)>>> = OnceLock::new();
 
@@ -21,7 +127,9 @@ fn redeem_registry() -> MutexGuard<'static, Vec<(String, String, Instant)>> {
 }
 
 fn redeem_register(key: String, value: String) {
-    redeem_registry().push((key, value, Instant::now()));
+    let mut entries = redeem_registry();
+    entries.retain(|(entry, _, _)| entry != &key);
+    entries.push((key, value, Instant::now()));
 }
 
 fn redeem_take(key: &str) -> Option<String> {
@@ -42,7 +150,16 @@ fn hca_token_registry() -> MutexGuard<'static, Vec<(String, String, Instant)>> {
 }
 
 fn hca_token_register(key: String, value: String) {
-    hca_token_registry().push((key, value, Instant::now()));
+    let mut entries = hca_token_registry();
+    entries.retain(|(entry, _, _)| entry != &key);
+    entries.push((key, value, Instant::now()));
+}
+
+fn hca_token_get(key: &str) -> Option<String> {
+    hca_token_registry()
+        .iter()
+        .find(|(entry, _, _)| entry == key)
+        .map(|(_, value, _)| value.clone())
 }
 
 fn hca_token_take(key: &str) -> Option<String> {
@@ -54,20 +171,16 @@ fn hca_token_take(key: &str) -> Option<String> {
 #[get("/")]
 async fn index() -> impl Responder {
     HttpResponse::Ok()
-        .content_type("text/html; charset=utf-8")
-        .body(include_str!("resources/index.html"))
+        .content_type("text/plain; charset=utf-8")
+        .body("Hack Club Fillout HCA Redirect")
 }
 
 #[get("/button")]
-async fn button(req: HttpRequest) -> impl Responder {
-    let conn = req.connection_info();
+async fn button() -> impl Responder {
     let page = include_str!("resources/button.html")
-        .replace(
-            "{CLIENT_ID}",
-            &env::var("HCA_CLIENT_ID").unwrap_or_default(),
-        )
-        .replace("{SCHEMA}", conn.scheme())
-        .replace("{BASE_URL}", conn.host());
+        .replace("{CLIENT_ID}", &config().client_id)
+        .replace("{BASE_URL}", &config().base_url)
+        .replace("{NGROK_HEADER}", NGROK_HEADER);
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(page)
@@ -85,17 +198,15 @@ struct CallbackArgs {
 }
 
 #[get("/callback")]
-async fn callback(req: HttpRequest, query: web::Query<CallbackArgs>) -> impl Responder {
-    let split_vec = query.state.split("fillout_url").collect::<Vec<&str>>();
-    let crypto = split_vec[0];
-    let fillout_url = split_vec[1];
-
-    let redirect_uri = {
-        let conn = req.connection_info();
-        format!("{}://{}/callback", conn.scheme(), conn.host())
+async fn callback(query: web::Query<CallbackArgs>) -> impl Responder {
+    let Some((_, fillout_url)) = query.state.split_once(STATE_SEPARATOR) else {
+        return HttpResponse::BadRequest().body("malformed state");
     };
-    let client_id = env::var("HCA_CLIENT_ID").unwrap_or_default();
-    let client_secret = env::var("HCA_CLIENT_SECRET").unwrap_or_default();
+    if !is_allowed_form_url(fillout_url) {
+        return HttpResponse::BadRequest().body("redirect target not allowed");
+    }
+
+    let redirect_uri = format!("{}/callback", config().base_url);
 
     let response = match reqwest::Client::new()
         .post("https://auth.hackclub.com/oauth/token")
@@ -103,8 +214,8 @@ async fn callback(req: HttpRequest, query: web::Query<CallbackArgs>) -> impl Res
             ("grant_type", "authorization_code"),
             ("code", query.code.as_str()),
             ("redirect_uri", redirect_uri.as_str()),
-            ("client_id", client_id.as_str()),
-            ("client_secret", client_secret.as_str()),
+            ("client_id", config().client_id.as_str()),
+            ("client_secret", config().client_secret.as_str()),
         ])
         .send()
         .await
@@ -120,33 +231,36 @@ async fn callback(req: HttpRequest, query: web::Query<CallbackArgs>) -> impl Res
         Err(_) => return HttpResponse::BadGateway().finish(),
     };
 
-    redeem_register(crypto.to_string(), token);
+    let redeem_id = random_token();
+    redeem_register(redeem_id.clone(), token);
+
+    let form_url = fillout_url.split('#').next().unwrap_or(fillout_url);
 
     HttpResponse::SeeOther()
-        .append_header(("Location", fillout_url))
+        .append_header((
+            "Location",
+            format!("{form_url}#{REDEEM_FRAGMENT}={redeem_id}"),
+        ))
         .finish()
 }
 
 #[derive(serde::Deserialize)]
 struct RedeemArgs {
-    state: String,
+    redeem: String,
 }
 
 #[get("/redeem")]
 async fn redeem(query: web::Query<RedeemArgs>) -> impl Responder {
-    let hca_token = match redeem_take(query.state.as_str()) {
-        Some(token) => token,
-        None => return HttpResponse::BadRequest().finish(),
+    let Some(hca_token) = redeem_take(query.redeem.as_str()) else {
+        return HttpResponse::BadRequest().finish();
     };
-    let opaque_token: String = (&mut rand::rng())
-        .sample_iter(Alphanumeric)
-        .take(32)
-        .map(char::from)
-        .collect();
 
+    let opaque_token = random_token();
     hca_token_register(opaque_token.clone(), hca_token);
 
-    HttpResponse::Ok().body(opaque_token)
+    HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .body(opaque_token)
 }
 
 #[derive(serde::Serialize, Default)]
@@ -213,7 +327,7 @@ async fn fields(req: HttpRequest) -> impl Responder {
         Some(token) => token,
         None => return HttpResponse::Unauthorized().body("missing bearer token"),
     };
-    let hca_token = match hca_token_take(opaque_token) {
+    let hca_token = match hca_token_get(opaque_token) {
         Some(token) => token,
         None => return HttpResponse::Unauthorized().body("unknown or already used token"),
     };
@@ -234,13 +348,17 @@ async fn fields(req: HttpRequest) -> impl Responder {
         Err(_) => return HttpResponse::BadGateway().finish(),
     };
 
+    let _ = hca_token_take(opaque_token);
+
     let addresses = auth_data.identity.addresses.unwrap_or_default();
     let primary_address = addresses
         .iter()
         .find(|address| address.primary)
         .or_else(|| addresses.first());
 
-    HttpResponse::Ok().json(Fields {
+    HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(Fields {
         first_name: auth_data.identity.first_name.unwrap_or_default(),
         last_name: auth_data.identity.last_name.unwrap_or_default(),
         email: auth_data.identity.primary_email.unwrap_or_default(),
@@ -268,12 +386,12 @@ async fn fields(req: HttpRequest) -> impl Responder {
     })
 }
 
+
 #[get("/airtable")]
-async fn airtable(req: HttpRequest) -> impl Responder {
-    let conn = req.connection_info();
+async fn airtable() -> impl Responder {
     let script = include_str!("resources/airtable.js")
-        .replace("{SCHEMA}", conn.scheme())
-        .replace("{BASE_URL}", conn.host());
+        .replace("{BASE_URL}", &config().base_url)
+        .replace("{NGROK_HEADER}", NGROK_HEADER);
     HttpResponse::Ok()
         .content_type("text/javascript; charset=utf-8")
         .body(script)
@@ -281,14 +399,36 @@ async fn airtable(req: HttpRequest) -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| {
-        let cors = Cors::default()
-            .allow_any_origin()
-            .allow_any_method()
+    if CONFIG
+        .set(Config {
+            base_url: base_url(),
+            client_id: require_env("HCA_CLIENT_ID"),
+            client_secret: require_env("HCA_CLIENT_SECRET"),
+        })
+        .is_err()
+    {
+        panic!("config was already set");
+    }
+
+    let governor = GovernorConfigBuilder::default()
+        .key_extractor(ClientIpKeyExtractor)
+        .seconds_per_request(1)
+        .burst_size(20)
+        .finish()
+        .expect("valid governor config");
+
+    HttpServer::new(move || {
+        let cors = Cors::default().allowed_methods(["GET"]);
+        #[cfg(debug_assertions)]
+        let cors = cors
+            .allowed_origin_fn(|_, _| true)
             .allowed_header("ngrok-skip-browser-warning");
+        #[cfg(not(debug_assertions))]
+        let cors = cors.allowed_origin_fn(|origin, _| is_allowed_origin(origin));
 
         App::new()
             .wrap(cors)
+            .wrap(Governor::new(&governor))
             .service(index)
             .service(button)
             .service(callback)
