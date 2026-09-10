@@ -26,6 +26,9 @@
       button.parentElement.parentElement.parentElement.disabled = true;
       button.parentElement.parentElement.parentElement.style.opacity = 0.5;
       button.innerText = "Sign in with Hack Club to submit";
+      document.getElementById("btn").classList.remove("btn-paired");
+      document.getElementById("btn").classList.add("btn-unpaired");
+      document.getElementById("btn").innerText = "Continue with Hack Club";
     }
 
     function enableButton() {
@@ -33,37 +36,62 @@
       button.parentElement.parentElement.parentElement.disabled = false;
       button.parentElement.parentElement.parentElement.style.opacity = 1;
       button.innerText = "Submit";
+      document.getElementById("btn").classList.remove("btn-unpaired");
+      document.getElementById("btn").classList.add("btn-paired");
+      document.getElementById("btn").innerText = "Logged in with Hack Club";
     }
-    if (
-      document.cookie
+
+    function getCookie(name) {
+      return document.cookie
         .split("; ")
-        .some((row) => row.startsWith(`${encodeURIComponent("state")}=`))
-    ) {
-      let state_val = document.cookie
-        .split("; ")
-        .find((row) => row.startsWith("state="))
-        ?.slice("state=".length);
+        .find((row) => row.startsWith(name + "="))
+        ?.slice((name + "=").length);
+    }
+
+    function startNewState() {
+      document.cookie = "state=" + state + "; max-age=600; path=/;";
+      disableButton();
+    }
+
+    function populateToken(token) {
+      let input = [...window.top.document.querySelectorAll("input")].find(
+        (i) =>
+          [i.name, i.id, i.placeholder, i.getAttribute("aria-label")].some(
+            (attr) => attr && attr.toLowerCase().includes("token"),
+          ),
+      );
+      Object.getOwnPropertyDescriptor(
+        window.top.HTMLInputElement.prototype,
+        "value",
+      ).set.call(input, token);
+      input.dispatchEvent(new window.top.Event("input", { bubbles: true }));
+    }
+
+    let token_val = getCookie("token");
+    let state_val = getCookie("state");
+
+    if (token_val) {
+      populateToken(token_val);
+      enableButton();
+    } else if (state_val) {
       fetch("{SCHEMA}://{BASE_URL}/redeem?state=" + state_val, {
         headers: { "ngrok-skip-browser-warning": "1" },
       })
-        .then((response) => response.text())
+        .then((response) => {
+          if (response.status === 400) {
+            startNewState();
+            return null;
+          }
+          return response.text();
+        })
         .then((token) => {
-          let input = [...window.top.document.querySelectorAll("input")].find(
-            (i) =>
-              [i.name, i.id, i.placeholder, i.getAttribute("aria-label")].some(
-                (attr) => attr && attr.toLowerCase().includes("token"),
-              ),
-          );
-          Object.getOwnPropertyDescriptor(
-            window.top.HTMLInputElement.prototype,
-            "value",
-          ).set.call(input, token);
-          input.dispatchEvent(new window.top.Event("input", { bubbles: true }));
+          if (token === null) return;
+          document.cookie = "token=" + token + "; max-age=600; path=/;";
+          populateToken(token);
+          enableButton();
         });
-      enableButton();
     } else {
-      document.cookie = "state=" + state + "; max-age=600; path=/;";
-      disableButton();
+      startNewState();
     }
   </script>
   <p
@@ -109,6 +137,13 @@
 
     .btn-unpaired:hover {
       background-color: #fc4760;
+    }
+
+    .btn-paired {
+      background-color: #49f2a0;
+      color: #000;
+      cursor: default;
+      transition: background-color 0.2s;
     }
   </style>
 </div>
