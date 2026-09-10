@@ -97,7 +97,7 @@ async fn callback(req: HttpRequest, query: web::Query<CallbackArgs>) -> impl Res
     let client_id = env::var("HCA_CLIENT_ID").unwrap_or_default();
     let client_secret = env::var("HCA_CLIENT_SECRET").unwrap_or_default();
 
-    let response = reqwest::Client::new()
+    let response = match reqwest::Client::new()
         .post("https://auth.hackclub.com/oauth/token")
         .form(&[
             ("grant_type", "authorization_code"),
@@ -107,13 +107,16 @@ async fn callback(req: HttpRequest, query: web::Query<CallbackArgs>) -> impl Res
             ("client_secret", client_secret.as_str()),
         ])
         .send()
-        .await;
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return HttpResponse::BadGateway().finish(),
+    };
 
-    let token = match response {
-        Ok(response) => match response.json::<TokenResponse>().await {
-            Ok(body) => body.access_token,
-            Err(_) => return HttpResponse::BadGateway().finish(),
-        },
+    let body = response.text().await.unwrap_or_default();
+
+    let token = match serde_json::from_str::<TokenResponse>(&body) {
+        Ok(body) => body.access_token,
         Err(_) => return HttpResponse::BadGateway().finish(),
     };
 
@@ -165,12 +168,13 @@ struct Fields {
 #[derive(serde::Deserialize, serde::Serialize)]
 struct AuthData {
     identity: Identity,
+    #[serde(default)]
     scopes: Vec<String>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct Identity {
-    id: String,
+    id: Option<String>,
     first_name: Option<String>,
     last_name: Option<String>,
     primary_email: Option<String>,
@@ -184,16 +188,17 @@ struct Identity {
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct Address {
-    id: String,
+    id: Option<String>,
     first_name: Option<String>,
     last_name: Option<String>,
-    line_1: String,
+    line_1: Option<String>,
     line_2: Option<String>,
-    city: String,
-    state: String,
-    postal_code: String,
-    country: String,
+    city: Option<String>,
+    state: Option<String>,
+    postal_code: Option<String>,
+    country: Option<String>,
     phone_number: Option<String>,
+    #[serde(default)]
     primary: bool,
 }
 
@@ -206,24 +211,26 @@ async fn fields(req: HttpRequest) -> impl Responder {
         .and_then(|value| value.strip_prefix("Bearer "))
     {
         Some(token) => token,
-        None => return HttpResponse::Unauthorized().finish(),
+        None => return HttpResponse::Unauthorized().body("missing bearer token"),
     };
     let hca_token = match hca_token_take(opaque_token) {
         Some(token) => token,
-        None => return HttpResponse::Unauthorized().finish(),
+        None => return HttpResponse::Unauthorized().body("unknown or already used token"),
     };
-
-    let response = reqwest::Client::new()
+    let response = match reqwest::Client::new()
         .get("https://auth.hackclub.com/api/v1/me")
         .bearer_auth(hca_token)
         .send()
-        .await;
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return HttpResponse::BadGateway().finish(),
+    };
 
-    let auth_data = match response {
-        Ok(response) => match response.json::<AuthData>().await {
-            Ok(auth_data) => auth_data,
-            Err(_) => return HttpResponse::BadGateway().finish(),
-        },
+    let body = response.text().await.unwrap_or_default();
+
+    let auth_data = match serde_json::from_str::<AuthData>(&body) {
+        Ok(auth_data) => auth_data,
         Err(_) => return HttpResponse::BadGateway().finish(),
     };
 
@@ -238,27 +245,38 @@ async fn fields(req: HttpRequest) -> impl Responder {
         last_name: auth_data.identity.last_name.unwrap_or_default(),
         email: auth_data.identity.primary_email.unwrap_or_default(),
         address_line_1: primary_address
-            .map(|address| address.line_1.clone())
+            .and_then(|address| address.line_1.clone())
             .unwrap_or_default(),
         address_line_2: primary_address
             .and_then(|address| address.line_2.clone())
             .unwrap_or_default(),
         city: primary_address
-            .map(|address| address.city.clone())
+            .and_then(|address| address.city.clone())
             .unwrap_or_default(),
         state: primary_address
-            .map(|address| address.state.clone())
+            .and_then(|address| address.state.clone())
             .unwrap_or_default(),
         country: primary_address
-            .map(|address| address.country.clone())
+            .and_then(|address| address.country.clone())
             .unwrap_or_default(),
         postal_code: primary_address
-            .map(|address| address.postal_code.clone())
+            .and_then(|address| address.postal_code.clone())
             .unwrap_or_default(),
         birthday: auth_data.identity.birthday.unwrap_or_default(),
         phone: auth_data.identity.phone_number.unwrap_or_default(),
         ysws_eligible: auth_data.identity.ysws_eligible.unwrap_or_default(),
     })
+}
+
+#[get("/airtable")]
+async fn airtable(req: HttpRequest) -> impl Responder {
+    let conn = req.connection_info();
+    let script = include_str!("resources/airtable.js")
+        .replace("{SCHEMA}", conn.scheme())
+        .replace("{BASE_URL}", conn.host());
+    HttpResponse::Ok()
+        .content_type("text/javascript; charset=utf-8")
+        .body(script)
 }
 
 #[actix_web::main]
@@ -276,6 +294,7 @@ async fn main() -> std::io::Result<()> {
             .service(callback)
             .service(redeem)
             .service(fields)
+            .service(airtable)
     })
     .bind(("0.0.0.0", 8080))?
     .run()
