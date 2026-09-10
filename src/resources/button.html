@@ -1,0 +1,114 @@
+<div>
+  <script>
+    const ALPHABET =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let state = Array.from(
+      crypto.getRandomValues(new Uint8Array(64)),
+      (b) => ALPHABET[b % 62],
+    ).join("");
+
+    function initialAuthRedirect() {
+      window.top.location.href =
+        "https://auth.hackclub.com/oauth/authorize?client_id={CLIENT_ID}&redirect_uri={SCHEMA}://{BASE_URL}/callback&response_type=code&scope=phone+birthdate+address+verification_status+slack_id+basic_info&state=" +
+        state +
+        "fillout_url" +
+        window.location.href;
+    }
+
+    function getButton() {
+      return [...window.top.document.querySelectorAll("div")].find(
+        (d) => !d.children.length && d.textContent.trim() === "Submit",
+      );
+    }
+
+    function disableButton() {
+      let button = getButton();
+      button.parentElement.parentElement.parentElement.disabled = true;
+      button.parentElement.parentElement.parentElement.style.opacity = 0.5;
+      button.innerText = "Sign in with Hack Club to submit";
+    }
+
+    function enableButton() {
+      let button = getButton();
+      button.parentElement.parentElement.parentElement.disabled = false;
+      button.parentElement.parentElement.parentElement.style.opacity = 1;
+      button.innerText = "Submit";
+    }
+    if (
+      document.cookie
+        .split("; ")
+        .some((row) => row.startsWith(`${encodeURIComponent("state")}=`))
+    ) {
+      let state_val = document.cookie
+        .split("; ")
+        .find((row) => row.startsWith("state="))
+        ?.slice("state=".length);
+      fetch("{SCHEMA}://{BASE_URL}/redeem?state=" + state_val, {
+        headers: { "ngrok-skip-browser-warning": "1" },
+      })
+        .then((response) => response.text())
+        .then((token) => {
+          let input = [...window.top.document.querySelectorAll("input")].find(
+            (i) =>
+              [i.name, i.id, i.placeholder, i.getAttribute("aria-label")].some(
+                (attr) => attr && attr.toLowerCase().includes("token"),
+              ),
+          );
+          Object.getOwnPropertyDescriptor(
+            window.top.HTMLInputElement.prototype,
+            "value",
+          ).set.call(input, token);
+          input.dispatchEvent(new window.top.Event("input", { bubbles: true }));
+        });
+      enableButton();
+    } else {
+      document.cookie = "state=" + state + "; max-age=600; path=/;";
+      disableButton();
+    }
+  </script>
+  <p
+    id="btn"
+    class="btn-unpaired"
+    onclick="
+      {
+        initialAuthRedirect();
+      }
+    "
+  >
+    Continue with Hack Club
+  </p>
+  <style>
+    @font-face {
+      font-family: "Phantom Sans";
+      src: url("https://assets.hackclub.com/fonts/Phantom_Sans_0.8/Regular.woff2")
+        format("woff2");
+      font-display: swap;
+    }
+
+    #btn {
+      margin: 0;
+      user-select: none;
+      font-family: "Phantom Sans", sans-serif;
+      text-decoration: none;
+      height: 44px;
+      font-size: 20px;
+      font-weight: normal;
+      display: inline-flex;
+      align-items: center;
+      padding-left: 20px;
+      padding-right: 20px;
+      border-radius: 32px;
+    }
+
+    .btn-unpaired {
+      background-color: #ec3750;
+      color: #fff;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+
+    .btn-unpaired:hover {
+      background-color: #fc4760;
+    }
+  </style>
+</div>
