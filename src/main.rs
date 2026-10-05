@@ -115,27 +115,30 @@ impl KeyExtractor for ClientIpKeyExtractor {
     }
 }
 
-static REDEEM_REGISTRY: OnceLock<Mutex<Vec<(String, String, Instant)>>> = OnceLock::new();
+static REDEEM_REGISTRY: OnceLock<Mutex<Vec<(String, String, String, Instant)>>> = OnceLock::new();
 
-fn redeem_registry() -> MutexGuard<'static, Vec<(String, String, Instant)>> {
+fn redeem_registry() -> MutexGuard<'static, Vec<(String, String, String, Instant)>> {
     let mut entries = REDEEM_REGISTRY
         .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
         .unwrap();
-    entries.retain(|(_, _, created)| created.elapsed() < REGISTRY_TTL);
+    entries.retain(|(_, _, _, created)| created.elapsed() < REGISTRY_TTL);
     entries
 }
 
-fn redeem_register(key: String, value: String) {
+fn redeem_register(key: String, nonce: String, value: String) {
     let mut entries = redeem_registry();
-    entries.retain(|(entry, _, _)| entry != &key);
-    entries.push((key, value, Instant::now()));
+    entries.retain(|(entry, _, _, _)| entry != &key);
+    entries.push((key, nonce, value, Instant::now()));
 }
 
-fn redeem_take(key: &str) -> Option<String> {
+fn redeem_take(key: &str, nonce: &str) -> Option<String> {
     let mut entries = redeem_registry();
-    let pos = entries.iter().position(|(entry, _, _)| entry == key)?;
-    Some(entries.remove(pos).1)
+    let pos = entries.iter().position(|(entry, _, _, _)| entry == key)?;
+    if entries[pos].1 != nonce {
+        return None;
+    }
+    Some(entries.remove(pos).2)
 }
 
 static HCA_TOKEN_REGISTRY: OnceLock<Mutex<Vec<(String, String, Instant)>>> = OnceLock::new();
@@ -199,9 +202,12 @@ struct CallbackArgs {
 
 #[get("/callback")]
 async fn callback(query: web::Query<CallbackArgs>) -> impl Responder {
-    let Some((_, fillout_url)) = query.state.split_once(STATE_SEPARATOR) else {
+    let Some((nonce, fillout_url)) = query.state.split_once(STATE_SEPARATOR) else {
         return HttpResponse::BadRequest().body("malformed state");
     };
+    if nonce.is_empty() || nonce.len() > 128 {
+        return HttpResponse::BadRequest().body("malformed state");
+    }
     if !is_allowed_form_url(fillout_url) {
         return HttpResponse::BadRequest().body("redirect target not allowed");
     }
@@ -232,7 +238,7 @@ async fn callback(query: web::Query<CallbackArgs>) -> impl Responder {
     };
 
     let redeem_id = random_token();
-    redeem_register(redeem_id.clone(), token);
+    redeem_register(redeem_id.clone(), nonce.to_string(), token);
 
     let form_url = fillout_url.split('#').next().unwrap_or(fillout_url);
 
@@ -247,11 +253,12 @@ async fn callback(query: web::Query<CallbackArgs>) -> impl Responder {
 #[derive(serde::Deserialize)]
 struct RedeemArgs {
     redeem: String,
+    nonce: String,
 }
 
 #[get("/redeem")]
 async fn redeem(query: web::Query<RedeemArgs>) -> impl Responder {
-    let Some(hca_token) = redeem_take(query.redeem.as_str()) else {
+    let Some(hca_token) = redeem_take(query.redeem.as_str(), query.nonce.as_str()) else {
         return HttpResponse::BadRequest().finish();
     };
 

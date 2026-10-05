@@ -8,6 +8,7 @@
     ).join("");
 
     function initialAuthRedirect() {
+      window.top.sessionStorage.setItem("hca_state", state);
       window.top.location.href =
         "https://auth.hackclub.com/oauth/authorize?client_id={CLIENT_ID}&redirect_uri={BASE_URL}/callback&response_type=code&scope=phone+birthdate+address+verification_status+slack_id+basic_info&state=" +
         encodeURIComponent(
@@ -63,18 +64,26 @@
     let redeem_id = new URLSearchParams(
       window.top.location.hash.slice(1),
     ).get("hca_redeem");
+    let nonce = window.top.sessionStorage.getItem("hca_state");
 
-    if (redeem_id === null) {
+    if (redeem_id === null || nonce === null) {
       disableButton();
     } else {
+      window.top.sessionStorage.removeItem("hca_state");
       window.top.history.replaceState(
         null,
         "",
         window.top.location.pathname + window.top.location.search,
       );
-      fetch("{BASE_URL}/redeem?redeem=" + encodeURIComponent(redeem_id), {
-        headers: { {NGROK_HEADER} },
-      })
+      fetch(
+        "{BASE_URL}/redeem?redeem=" +
+          encodeURIComponent(redeem_id) +
+          "&nonce=" +
+          encodeURIComponent(nonce),
+        {
+          headers: { {NGROK_HEADER} },
+        },
+      )
         .then((response) => (response.ok ? response.text() : null))
         .then((token) => {
           if (token === null) {
