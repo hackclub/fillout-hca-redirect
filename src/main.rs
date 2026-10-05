@@ -58,19 +58,16 @@ fn random_token() -> String {
 
 const ALLOWED_FORM_HOSTS: [&str; 2] = ["fillout.com", "forms.hackclub.com"];
 
-fn is_allowed_form_url(url: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(url) else {
-        return false;
-    };
+fn allowed_form_url(url: &str) -> Option<reqwest::Url> {
+    let url = reqwest::Url::parse(url).ok()?;
     if url.scheme() != "https" {
-        return false;
+        return None;
     }
-    let Some(host) = url.host_str() else {
-        return false;
-    };
+    let host = url.host_str()?;
     ALLOWED_FORM_HOSTS
         .iter()
         .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")))
+        .then_some(url)
 }
 
 #[cfg(not(debug_assertions))]
@@ -78,7 +75,7 @@ fn is_allowed_origin(origin: &header::HeaderValue) -> bool {
     let Ok(origin) = origin.to_str() else {
         return false;
     };
-    origin == config().base_url || is_allowed_form_url(origin)
+    origin == config().base_url || allowed_form_url(origin).is_some()
 }
 
 fn is_trusted_proxy(peer: &IpAddr) -> bool {
@@ -115,9 +112,11 @@ impl KeyExtractor for ClientIpKeyExtractor {
     }
 }
 
-static REDEEM_REGISTRY: OnceLock<Mutex<Vec<(String, String, String, Instant)>>> = OnceLock::new();
+type RedeemEntry = (String, String, String, Instant);
 
-fn redeem_registry() -> MutexGuard<'static, Vec<(String, String, String, Instant)>> {
+static REDEEM_REGISTRY: OnceLock<Mutex<Vec<RedeemEntry>>> = OnceLock::new();
+
+fn redeem_registry() -> MutexGuard<'static, Vec<RedeemEntry>> {
     let mut entries = REDEEM_REGISTRY
         .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
@@ -186,6 +185,7 @@ async fn button() -> impl Responder {
         .replace("{NGROK_HEADER}", NGROK_HEADER);
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
+        .insert_header(("Cache-Control", "no-store"))
         .body(page)
 }
 
@@ -208,9 +208,9 @@ async fn callback(query: web::Query<CallbackArgs>) -> impl Responder {
     if nonce.is_empty() || nonce.len() > 128 {
         return HttpResponse::BadRequest().body("malformed state");
     }
-    if !is_allowed_form_url(fillout_url) {
+    let Some(mut form_url) = allowed_form_url(fillout_url) else {
         return HttpResponse::BadRequest().body("redirect target not allowed");
-    }
+    };
 
     let redirect_uri = format!("{}/callback", config().base_url);
 
@@ -240,13 +240,10 @@ async fn callback(query: web::Query<CallbackArgs>) -> impl Responder {
     let redeem_id = random_token();
     redeem_register(redeem_id.clone(), nonce.to_string(), token);
 
-    let form_url = fillout_url.split('#').next().unwrap_or(fillout_url);
+    form_url.set_fragment(Some(&format!("{REDEEM_FRAGMENT}={redeem_id}")));
 
     HttpResponse::SeeOther()
-        .append_header((
-            "Location",
-            format!("{form_url}#{REDEEM_FRAGMENT}={redeem_id}"),
-        ))
+        .append_header(("Location", form_url.as_str()))
         .finish()
 }
 
@@ -401,6 +398,7 @@ async fn airtable() -> impl Responder {
         .replace("{NGROK_HEADER}", NGROK_HEADER);
     HttpResponse::Ok()
         .content_type("text/javascript; charset=utf-8")
+        .insert_header(("Cache-Control", "no-store"))
         .body(script)
 }
 

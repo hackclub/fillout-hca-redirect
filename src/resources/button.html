@@ -16,30 +16,51 @@
         );
     }
 
-    function getButton() {
-      return [...window.top.document.querySelectorAll("div")].find(
-        (d) => !d.children.length && d.textContent.trim() === "Submit",
-      );
+    let submitLabel = [...window.top.document.querySelectorAll("div")].find(
+      (d) => !d.children.length && d.textContent.trim() === "Submit",
+    );
+    let submitControl =
+      submitLabel && (submitLabel.closest("button") || submitLabel.parentElement);
+
+    function setButton(paired, text) {
+      let btn = document.getElementById("btn");
+      btn.classList.remove("btn-paired", "btn-unpaired");
+      btn.classList.add(paired ? "btn-paired" : "btn-unpaired");
+      btn.innerText = text;
+    }
+
+    function notify(text) {
+      if (submitLabel) {
+        submitLabel.innerText = text;
+      } else {
+        setButton(false, text);
+      }
     }
 
     function disableButton() {
-      let button = getButton();
-      button.parentElement.parentElement.parentElement.disabled = true;
-      button.parentElement.parentElement.parentElement.style.opacity = 0.5;
-      button.innerText = "Sign in with Hack Club to submit";
-      document.getElementById("btn").classList.remove("btn-paired");
-      document.getElementById("btn").classList.add("btn-unpaired");
-      document.getElementById("btn").innerText = "Continue with Hack Club";
+      if (!submitControl) {
+        setButton(
+          false,
+          'Cannot find the form\'s "Submit" button (contact the YSWS organizer)',
+        );
+        return;
+      }
+      submitControl.disabled = true;
+      submitControl.style.pointerEvents = "none";
+      submitControl.style.opacity = 0.5;
+      submitLabel.innerText = "Sign in with Hack Club to submit";
+      setButton(false, "Continue with Hack Club");
     }
 
     function enableButton() {
-      let button = getButton();
-      button.parentElement.parentElement.parentElement.disabled = false;
-      button.parentElement.parentElement.parentElement.style.opacity = 1;
-      button.innerText = "Submit";
-      document.getElementById("btn").classList.remove("btn-unpaired");
-      document.getElementById("btn").classList.add("btn-paired");
-      document.getElementById("btn").innerText = "Logged in with Hack Club";
+      if (!submitControl) {
+        return;
+      }
+      submitControl.disabled = false;
+      submitControl.style.pointerEvents = "";
+      submitControl.style.opacity = 1;
+      submitLabel.innerText = "Submit";
+      setButton(true, "Logged in with Hack Club");
     }
 
     function populateToken(token) {
@@ -49,8 +70,7 @@
         ),
       );
       if (!input) {
-        getButton().innerText =
-          'Missing internal "token" field (contact the YSWS organizer)';
+        notify('Missing internal "token" field (contact the YSWS organizer)');
         return false;
       }
       Object.getOwnPropertyDescriptor(
