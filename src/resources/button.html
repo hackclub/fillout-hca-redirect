@@ -16,11 +16,20 @@
         );
     }
 
-    let submitLabel = [...window.top.document.querySelectorAll("div")].find(
-      (d) => !d.children.length && d.textContent.trim() === "Submit",
-    );
-    let submitControl =
-      submitLabel && (submitLabel.closest("button") || submitLabel.parentElement);
+    function findInput(name) {
+      return [...window.top.document.querySelectorAll("input")].find((i) =>
+        [i.name, i.id, i.placeholder, i.getAttribute("aria-label")].some(
+          (attr) => attr && attr.toLowerCase() === name,
+        ),
+      );
+    }
+
+    let submitControl = [
+      ...window.top.document.querySelectorAll(".fillout-field-button button"),
+    ].find((b) => !b.closest(".fillout-back-button, .fillout-skip-button"));
+    let submitLabel =
+      submitControl && submitControl.querySelector("span div div");
+    let submitText = submitLabel && submitLabel.innerText;
 
     function setButton(paired, text) {
       let btn = document.getElementById("btn");
@@ -41,14 +50,16 @@
       if (!submitControl) {
         setButton(
           false,
-          'Cannot find the form\'s "Submit" button (contact the YSWS organizer)',
+          "Cannot find the form's submit button (contact the YSWS organizer)",
         );
         return;
       }
       submitControl.disabled = true;
       submitControl.style.pointerEvents = "none";
       submitControl.style.opacity = 0.5;
-      submitLabel.innerText = "Sign in with Hack Club to submit";
+      if (submitLabel) {
+        submitLabel.innerText = "Sign in with Hack Club to continue";
+      }
       setButton(false, "Continue with Hack Club");
     }
 
@@ -59,16 +70,14 @@
       submitControl.disabled = false;
       submitControl.style.pointerEvents = "";
       submitControl.style.opacity = 1;
-      submitLabel.innerText = "Submit";
+      if (submitLabel) {
+        submitLabel.innerText = submitText;
+      }
       setButton(true, "Logged in with Hack Club");
     }
 
     function populateToken(token) {
-      let input = [...window.top.document.querySelectorAll("input")].find((i) =>
-        [i.name, i.id, i.placeholder, i.getAttribute("aria-label")].some(
-          (attr) => attr && attr.toLowerCase() === "token",
-        ),
-      );
+      let input = findInput("token");
       if (!input) {
         notify('Missing internal "token" field (contact the YSWS organizer)');
         return false;
