@@ -2,6 +2,8 @@
 
 This allows a YSWS program to have a button on their submission Fillout form that reads `Continue with Hack Club`. After the user logs in and submits the form, the following fields in Airtable will be automatically populated:
 
+This is minimal and I didn't spent too much time on it. If you're looking for something more feature complete, check out [Wristband](https://wristband.hackclub.com/).
+
 - First Name
 - Last Name
 - Email
