@@ -8,7 +8,9 @@ let response = await fetch("{BASE_URL}/fields", {
 });
 
 if (!response.ok) {
-  throw new Error("/fields returned " + response.status);
+  throw new Error(
+    "/fields returned " + response.status + ": " + (await response.text()),
+  );
 }
 
 let fields = await response.json();

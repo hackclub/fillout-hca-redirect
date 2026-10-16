@@ -2,6 +2,7 @@
   <script>
     const ALPHABET =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const SESSION_TTL = 50 * 60 * 1000;
     let state = Array.from(
       crypto.getRandomValues(new Uint8Array(64)),
       (b) => ALPHABET[b % 62],
@@ -24,12 +25,20 @@
       );
     }
 
-    let submitControl = [
-      ...window.top.document.querySelectorAll(".fillout-field-button button"),
-    ].find((b) => !b.closest(".fillout-back-button, .fillout-skip-button"));
-    let submitLabel =
-      submitControl && submitControl.querySelector("span div div");
-    let submitText = submitLabel && submitLabel.innerText;
+    let linked = false;
+    let notice = null;
+    let submitText = null;
+    let appliedControl = null;
+
+    function findSubmitControl() {
+      return [
+        ...window.top.document.querySelectorAll(".fillout-field-button button"),
+      ].find((b) => !b.closest(".fillout-back-button, .fillout-skip-button"));
+    }
+
+    function findSubmitLabel(control) {
+      return control && control.querySelector("span div div");
+    }
 
     function setButton(paired, text) {
       let btn = document.getElementById("btn");
@@ -39,41 +48,49 @@
     }
 
     function notify(text) {
-      if (submitLabel) {
-        submitLabel.innerText = text;
+      let label = findSubmitLabel(findSubmitControl());
+      if (label) {
+        label.innerText = text;
       } else {
         setButton(false, text);
       }
     }
 
-    function disableButton() {
-      if (!submitControl) {
-        setButton(
-          false,
-          "Continue signing in with Hack Club",
-        );
+    function applyState() {
+      let control = findSubmitControl();
+      let label = findSubmitLabel(control);
+      if (label && submitText === null) {
+        submitText = label.innerText;
+      }
+      appliedControl = control;
+      if (!control) {
+        setButton(false, "Continue signing in with Hack Club");
         return;
       }
-      submitControl.disabled = true;
-      submitControl.style.pointerEvents = "none";
-      submitControl.style.opacity = 0.5;
-      if (submitLabel) {
-        submitLabel.innerText = "Sign in with Hack Club to continue";
+      control.disabled = !linked;
+      control.style.pointerEvents = linked ? "" : "none";
+      control.style.opacity = linked ? 1 : 0.5;
+      if (label) {
+        label.innerText = linked
+          ? submitText
+          : notice || "Sign in with Hack Club to continue";
       }
-      setButton(false, "Continue with Hack Club");
+      setButton(
+        linked,
+        linked ? "Logged in with Hack Club" : "Continue with Hack Club",
+      );
+    }
+
+    function disableButton(message) {
+      linked = false;
+      notice = message || null;
+      applyState();
     }
 
     function enableButton() {
-      if (!submitControl) {
-        return;
-      }
-      submitControl.disabled = false;
-      submitControl.style.pointerEvents = "";
-      submitControl.style.opacity = 1;
-      if (submitLabel) {
-        submitLabel.innerText = submitText;
-      }
-      setButton(true, "Logged in with Hack Club");
+      linked = true;
+      notice = null;
+      applyState();
     }
 
     function populateToken(token) {
@@ -89,6 +106,52 @@
       input.dispatchEvent(new window.top.Event("input", { bubbles: true }));
       return true;
     }
+
+    let sessionDeadline = null;
+
+    function startSession() {
+      sessionDeadline = Date.now() + SESSION_TTL;
+      setTimeout(checkSession, SESSION_TTL);
+      window.top.document.addEventListener("visibilitychange", checkSession);
+      window.top.addEventListener("focus", checkSession);
+    }
+
+    function checkSession() {
+      if (sessionDeadline === null || Date.now() < sessionDeadline) {
+        return;
+      }
+      sessionDeadline = null;
+      populateToken("");
+      disableButton("Session expired, please relink Hack Club Auth");
+    }
+
+    window.top.document.addEventListener(
+      "keydown",
+      (event) => {
+        if (linked || event.key !== "Enter") {
+          return;
+        }
+        let target = event.target;
+        if (
+          target &&
+          (target.tagName === "TEXTAREA" ||
+            target.tagName === "SELECT" ||
+            target.isContentEditable ||
+            (target.closest &&
+              target.closest("[role=combobox], [role=listbox], [role=menu]")))
+        ) {
+          return;
+        }
+        event.stopPropagation();
+      },
+      true,
+    );
+
+    new window.top.MutationObserver(() => {
+      if (findSubmitControl() !== appliedControl) {
+        applyState();
+      }
+    }).observe(window.top.document.body, { childList: true, subtree: true });
 
     let redeem_id = new URLSearchParams(
       window.top.location.hash.slice(1),
@@ -121,6 +184,7 @@
           }
           if (populateToken(token)) {
             enableButton();
+            startSession();
           }
         });
     }

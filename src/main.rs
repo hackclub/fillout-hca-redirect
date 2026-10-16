@@ -10,7 +10,8 @@ use std::env;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-const REGISTRY_TTL: Duration = Duration::from_secs(600);
+const HCA_TOKEN_TTL: Duration = Duration::from_secs(3060);
+const REDEEM_TTL: Duration = Duration::from_secs(600);
 const STATE_SEPARATOR: &str = "hack_club-redirect_fillout_url";
 const REDEEM_FRAGMENT: &str = "hca_redeem";
 
@@ -112,7 +113,13 @@ impl KeyExtractor for ClientIpKeyExtractor {
     }
 }
 
-type RedeemEntry = (String, String, String, Instant);
+struct RedeemEntry {
+    id: String,
+    nonce: String,
+    hca_token: String,
+    hca_expires_at: Instant,
+    created: Instant,
+}
 
 static REDEEM_REGISTRY: OnceLock<Mutex<Vec<RedeemEntry>>> = OnceLock::new();
 
@@ -121,53 +128,71 @@ fn redeem_registry() -> MutexGuard<'static, Vec<RedeemEntry>> {
         .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
         .unwrap();
-    entries.retain(|(_, _, _, created)| created.elapsed() < REGISTRY_TTL);
+    entries.retain(|entry| entry.created.elapsed() < REDEEM_TTL);
     entries
 }
 
-fn redeem_register(key: String, nonce: String, value: String) {
+fn redeem_register(id: String, nonce: String, hca_token: String, hca_expires_at: Instant) {
     let mut entries = redeem_registry();
-    entries.retain(|(entry, _, _, _)| entry != &key);
-    entries.push((key, nonce, value, Instant::now()));
+    entries.retain(|entry| entry.id != id);
+    entries.push(RedeemEntry {
+        id,
+        nonce,
+        hca_token,
+        hca_expires_at,
+        created: Instant::now(),
+    });
 }
 
-fn redeem_take(key: &str, nonce: &str) -> Option<String> {
+fn redeem_take(id: &str, nonce: &str) -> Option<(String, Instant)> {
     let mut entries = redeem_registry();
-    let pos = entries.iter().position(|(entry, _, _, _)| entry == key)?;
-    if entries[pos].1 != nonce {
+    let pos = entries.iter().position(|entry| entry.id == id)?;
+    if entries[pos].nonce != nonce {
         return None;
     }
-    Some(entries.remove(pos).2)
+    let entry = entries.remove(pos);
+    Some((entry.hca_token, entry.hca_expires_at))
 }
 
-static HCA_TOKEN_REGISTRY: OnceLock<Mutex<Vec<(String, String, Instant)>>> = OnceLock::new();
+struct HcaTokenEntry {
+    id: String,
+    hca_token: String,
+    expires_at: Instant,
+}
 
-fn hca_token_registry() -> MutexGuard<'static, Vec<(String, String, Instant)>> {
+static HCA_TOKEN_REGISTRY: OnceLock<Mutex<Vec<HcaTokenEntry>>> = OnceLock::new();
+
+fn hca_token_registry() -> MutexGuard<'static, Vec<HcaTokenEntry>> {
     let mut entries = HCA_TOKEN_REGISTRY
         .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
         .unwrap();
-    entries.retain(|(_, _, created)| created.elapsed() < REGISTRY_TTL);
+    let now = Instant::now();
+    entries.retain(|entry| now < entry.expires_at);
     entries
 }
 
-fn hca_token_register(key: String, value: String) {
+fn hca_token_register(id: String, hca_token: String, expires_at: Instant) {
     let mut entries = hca_token_registry();
-    entries.retain(|(entry, _, _)| entry != &key);
-    entries.push((key, value, Instant::now()));
+    entries.retain(|entry| entry.id != id);
+    entries.push(HcaTokenEntry {
+        id,
+        hca_token,
+        expires_at,
+    });
 }
 
-fn hca_token_get(key: &str) -> Option<String> {
+fn hca_token_get(id: &str) -> Option<String> {
     hca_token_registry()
         .iter()
-        .find(|(entry, _, _)| entry == key)
-        .map(|(_, value, _)| value.clone())
+        .find(|entry| entry.id == id)
+        .map(|entry| entry.hca_token.clone())
 }
 
-fn hca_token_take(key: &str) -> Option<String> {
+fn hca_token_take(id: &str) -> Option<String> {
     let mut entries = hca_token_registry();
-    let pos = entries.iter().position(|(entry, _, _)| entry == key)?;
-    Some(entries.remove(pos).1)
+    let pos = entries.iter().position(|entry| entry.id == id)?;
+    Some(entries.remove(pos).hca_token)
 }
 
 #[get("/")]
@@ -192,6 +217,7 @@ async fn button() -> impl Responder {
 #[derive(serde::Deserialize)]
 struct TokenResponse {
     access_token: String,
+    expires_in: Option<u64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -232,13 +258,22 @@ async fn callback(query: web::Query<CallbackArgs>) -> impl Responder {
 
     let body = response.text().await.unwrap_or_default();
 
-    let token = match serde_json::from_str::<TokenResponse>(&body) {
-        Ok(body) => body.access_token,
+    let (token, expires_in) = match serde_json::from_str::<TokenResponse>(&body) {
+        Ok(body) => (body.access_token, body.expires_in),
         Err(_) => return HttpResponse::BadGateway().finish(),
     };
 
+    let hca_ttl = expires_in
+        .map(|seconds| HCA_TOKEN_TTL.min(Duration::from_secs(seconds)))
+        .unwrap_or(HCA_TOKEN_TTL);
+
     let redeem_id = random_token();
-    redeem_register(redeem_id.clone(), nonce.to_string(), token);
+    redeem_register(
+        redeem_id.clone(),
+        nonce.to_string(),
+        token,
+        Instant::now() + hca_ttl,
+    );
 
     form_url.set_fragment(Some(&format!("{REDEEM_FRAGMENT}={redeem_id}")));
 
@@ -255,12 +290,14 @@ struct RedeemArgs {
 
 #[get("/redeem")]
 async fn redeem(query: web::Query<RedeemArgs>) -> impl Responder {
-    let Some(hca_token) = redeem_take(query.redeem.as_str(), query.nonce.as_str()) else {
+    let Some((hca_token, hca_expires_at)) =
+        redeem_take(query.redeem.as_str(), query.nonce.as_str())
+    else {
         return HttpResponse::BadRequest().finish();
     };
 
     let opaque_token = random_token();
-    hca_token_register(opaque_token.clone(), hca_token);
+    hca_token_register(opaque_token.clone(), hca_token, hca_expires_at);
 
     HttpResponse::Ok()
         .insert_header(("Cache-Control", "no-store"))
@@ -344,6 +381,11 @@ async fn fields(req: HttpRequest) -> impl Responder {
         Ok(response) => response,
         Err(_) => return HttpResponse::BadGateway().finish(),
     };
+
+    if !response.status().is_success() {
+        return HttpResponse::BadGateway()
+            .body(format!("hack club auth returned {}", response.status()));
+    }
 
     let body = response.text().await.unwrap_or_default();
 
